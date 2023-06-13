@@ -13,11 +13,11 @@
 #include <thread>
 #include <vector>
 #include <mutex>
+#include <unordered_map>
 #include <condition_variable>
 #include <msquic.hpp>
 #include "quicreach.ver"
 #include "domains.hpp"
-
 #ifdef _WIN32
 #define QUIC_CALL __cdecl
 #else
@@ -353,11 +353,110 @@ bool TestReachability() {
     return Config.RequireAll ? ((size_t)Results.ReachableCount == Config.HostNames.size()) : (Results.ReachableCount != 0);
 }
 
+enum QuicProbeState {PROBE_DOWN, PROBE_UP, PROBE_PAUSED, PROBE_STOPPED, PROBE_NONEXISTANT};
+enum ClientState    {CLIENT_DOWN, CLIENT_HEALTHY, CLIENT_UNHEALTHY, CLIENT_UNKNOWN};
+
+struct AsyncQuicProbe {
+    private:
+        MsQuicApi* api = nullptr;
+        QuicProbeState   state;
+        ClientState      clientState;
+        const char*      targetUrl;
+        thread           worker;
+        bool             paused;
+        bool             stopped;
+    public:
+        AsyncQuicProbe(const char* url, MsQuicApi& api){
+            targetUrl = strdup(url);
+            this->api = &api;
+            beginProbe();
+        }
+
+        ~AsyncQuicProbe(){
+            delete targetUrl;
+        }
+
+        void           threadFunc(); //looping quic query function that runs inside thread
+        void           beginProbe();
+        void           pauseProbe();
+        void           stopProbe();
+        QuicProbeState getProbeState();    
+        ClientState    getClientState();
+};
+
+void AsyncQuicProbe::threadFunc(){
+    while(!stopped){
+        this_thread::sleep_for(1s);
+        while(!paused && !stopped) {
+            this_thread::sleep_for(60s);
+        }
+    }
+}
+
+void AsyncQuicProbe::beginProbe(){
+    paused    = false;
+    stopped   = false;
+    this->worker = thread(AsyncQuicProbe::beginProbe);
+}
+
+void AsyncQuicProbe::pauseProbe(){
+    paused = true;
+}
+
+void AsyncQuicProbe::stopProbe(){
+    stopped = true;
+    worker.detach();
+    state = PROBE_STOPPED;
+    clientState = CLIENT_UNKNOWN;
+}
+
+class QuicProbeManager {
+    private:
+        unordered_map<char*, AsyncQuicProbe> probes;
+        MsQuicApi api;
+    public:
+        QuicProbeState         getProbeState(char* url);
+        vector<QuicProbeState> getProbeStates();
+        ClientState            getClientState(char* url);
+        vector<ClientState>    getClientStates();
+        bool                   allocateProbe(char* url);
+        bool                   dealocateProbe(char* url);
+
+};
+
+QuicProbeState QuicProbeManager::getProbeState(char* url){
+    if (probes.find(url) != probes.end()){
+        return probes[url].getProbeState();
+    }
+
+    return PROBE_NONEXISTANT;
+};
+
+vector<QuicProbeState> QuicProbeManager::getProbeStates(){ //TODO change this to a map
+    vector<QuicProbeState> states;
+    for (auto i = probes.begin(); i != probes.end(); ++i){
+        try {
+            auto state = i->second.getProbeState();
+            states.push_back(state);
+        } catch (...) {
+            states.push_back(PROBE_DOWN);
+        }
+    }
+}
+
 int QUIC_CALL main(int argc, char **argv) {
 
     if (!ParseConfig(argc, argv) || Config.HostNames.empty()) return 1;
 
     MsQuic = new (std::nothrow) MsQuicApi();
+
+    auto registration = MsQuicRegistration("test");
+    MsQuicConfiguration Configuration(registration, Config.Alpn, Config.Settings, MsQuicCredentialConfig(Config.CredFlags));
+    if (!Configuration.IsValid()) { printf("Configuration initializtion failed!\n"); return false; }
+    Configuration.SetVersionSettings(VersionSettings);
+    Configuration.SetVersionNegotiationExtEnabled();
+
+    
     if (QUIC_FAILED(MsQuic->GetInitStatus())) {
         printf("MsQuicApi failed, 0x%x\n", MsQuic->GetInitStatus());
         return 1;
