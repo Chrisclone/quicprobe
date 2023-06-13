@@ -187,6 +187,7 @@ bool ParseConfig(int argc, char **argv) {
     return true;
 }
 
+
 struct ReachConnection : public MsQuicConnection {
     const char* HostName;
     bool HandshakeComplete {false};
@@ -225,8 +226,11 @@ struct ReachConnection : public MsQuicConnection {
         }
         return QUIC_STATUS_SUCCESS;
     }
+    bool succeeded = false;
 private:
     void OnReachable() {
+        succeeded = true;
+        printf(succeeded ? "true" : "false");
         HandshakeComplete = true;
         IncStat(Results.ReachableCount);
         GetStatistics(&Stats);
@@ -353,6 +357,7 @@ bool TestReachability() {
     return Config.RequireAll ? ((size_t)Results.ReachableCount == Config.HostNames.size()) : (Results.ReachableCount != 0);
 }
 
+/*
 enum QuicProbeState {PROBE_DOWN, PROBE_UP, PROBE_PAUSED, PROBE_STOPPED, PROBE_NONEXISTANT};
 enum ClientState    {CLIENT_DOWN, CLIENT_HEALTHY, CLIENT_UNHEALTHY, CLIENT_UNKNOWN};
 
@@ -367,7 +372,7 @@ struct AsyncQuicProbe {
         bool             stopped;
     public:
         AsyncQuicProbe(const char* url, MsQuicApi& api){
-            targetUrl = strdup(url);
+            targetUrl = _strdup(url);
             this->api = &api;
             beginProbe();
         }
@@ -396,7 +401,7 @@ void AsyncQuicProbe::threadFunc(){
 void AsyncQuicProbe::beginProbe(){
     paused    = false;
     stopped   = false;
-    this->worker = thread(AsyncQuicProbe::beginProbe);
+    //this->worker = thread(&threadFunc);
 }
 
 void AsyncQuicProbe::pauseProbe(){
@@ -443,20 +448,25 @@ vector<QuicProbeState> QuicProbeManager::getProbeStates(){ //TODO change this to
         }
     }
 }
+*/
 
-int QUIC_CALL main(int argc, char **argv) {
-
-    if (!ParseConfig(argc, argv) || Config.HostNames.empty()) return 1;
-
-    MsQuic = new (std::nothrow) MsQuicApi();
-
+ReachConnection* n = nullptr;
+void foo(){
     auto registration = MsQuicRegistration("test");
     MsQuicConfiguration Configuration(registration, Config.Alpn, Config.Settings, MsQuicCredentialConfig(Config.CredFlags));
-    if (!Configuration.IsValid()) { printf("Configuration initializtion failed!\n"); return false; }
-    Configuration.SetVersionSettings(VersionSettings);
-    Configuration.SetVersionNegotiationExtEnabled();
-
     
+    n = new ReachConnection(registration, Configuration, "google.com");
+}
+
+int QUIC_CALL main() {
+    
+    
+    MsQuic = new (std::nothrow) MsQuicApi();
+    
+    thread(foo).join();
+    
+    printf(n->succeeded ? "true" : "false");
+    /*
     if (QUIC_FAILED(MsQuic->GetInitStatus())) {
         printf("MsQuicApi failed, 0x%x\n", MsQuic->GetInitStatus());
         return 1;
@@ -466,6 +476,8 @@ int QUIC_CALL main(int argc, char **argv) {
     if (!Config.PrintStatistics) {
         printf("%s\n", Result ? "Success" : "Failure");
     }
+    
     delete MsQuic;
-    return Result ? 0 : 1;
+    */
+    return 0;
 }
