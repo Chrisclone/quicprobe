@@ -10,8 +10,10 @@
 #define QUICREACH_VERSION_ONLY 1
 
 #include <stdio.h>
+#include <string>
 #include <thread>
 #include <vector>
+#include <iostream>
 #include <mutex>
 #include <unordered_map>
 #include <condition_variable>
@@ -100,94 +102,6 @@ void IncStat( _Inout_ _Interlocked_operand_ uint32_t volatile &Addend) {
 #endif
 }
 
-void AddHostName(const char* arg) {
-    // Parse hostname(s), treating '*' as all top-level domains.
-    if (!strcmp(arg, "*")) {
-        for (auto Domain : TopDomains) {
-            Config.HostNames.push_back(Domain);
-        }
-    } else {
-        char* HostName = (char*)arg;
-        do {
-            char* End = strchr(HostName, ',');
-            if (End) *End = 0;
-            Config.HostNames.push_back(HostName);
-            if (!End) break;
-            HostName = End + 1;
-        } while (true);
-    }
-}
-
-bool ParseConfig(int argc, char **argv) {
-    if (argc < 2 || !strcmp(argv[1], "-?") || !strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
-        printf("usage: quicreach <hostname(s)> [options...]\n"
-               " -a, --alpn <alpn>      The ALPN to use for the handshake (def=h3)\n"
-               " -b, --built-in-val     Use built-in TLS validation logic\n"
-               " -c, --csv <file>       Writes CSV results to the given file\n"
-               " -h, --help             Prints this help text\n"
-               " -i, --ip <address>     The IP address to use\n"
-               " -l, --parallel <num>   The numer of parallel hosts to test at once (def=1)\n"
-               " -m, --mtu <mtu>        The initial (IPv6) MTU to use (def=1288)\n"
-               " -p, --port <port>      The UDP port to use (def=443)\n"
-               " -r, --req-all          Require all hostnames to succeed\n"
-               " -s, --stats            Print connection statistics\n"
-               " -u, --unsecure         Allows unsecure connections\n"
-               " -v, --version          Prints out the version\n"
-              );
-        return false;
-    }
-
-    for (int i = 1; i < argc; ++i) {
-        if (argv[i][0] != '-') {
-            AddHostName(argv[i]);
-
-        } else if (!strcmp(argv[i], "--alpn") || !strcmp(argv[i], "-a")) {
-            if (++i >= argc) { printf("Missing ALPN string\n"); return false; }
-            Config.Alpn = argv[i];
-
-        } else if (!strcmp(argv[i], "--built-in-val") || !strcmp(argv[i], "-b")) {
-            Config.CredFlags |= QUIC_CREDENTIAL_FLAG_USE_TLS_BUILTIN_CERTIFICATE_VALIDATION;
-
-        } else if (!strcmp(argv[i], "--csv") || !strcmp(argv[i], "-c")) {
-            if (++i >= argc) { printf("Missing file name\n"); return false; }
-            Config.OutCsvFile = argv[i];
-
-        } else if (!strcmp(argv[i], "--mtu") || !strcmp(argv[i], "-m")) {
-            if (++i >= argc) { printf("Missing MTU value\n"); return false; }
-            Config.Settings.SetMinimumMtu((uint16_t)atoi(argv[i]));
-
-        } else if (!strcmp(argv[i], "--ip") || !strcmp(argv[i], "-i")) {
-            if (++i >= argc) { printf("Missing IP address\n"); return false; }
-            if (!QuicAddrFromString(argv[i], 0, &Config.Address.SockAddr)) {
-                printf("Invalid address arg passed in\n"); return false;
-            }
-
-        } else if (!strcmp(argv[i], "--parallel") || !strcmp(argv[i], "-l")) {
-            if (++i >= argc) { printf("Missing parallel number\n"); return false; }
-            Config.Parallel = (uint32_t)atoi(argv[i]);
-
-        } else if (!strcmp(argv[i], "--port") || !strcmp(argv[i], "-p")) {
-            if (++i >= argc) { printf("Missing port number\n"); return false; }
-            Config.Port = (uint16_t)atoi(argv[i]);
-
-        } else if (!strcmp(argv[i], "--stats") || !strcmp(argv[i], "-s")) {
-            Config.PrintStatistics = true;
-
-        } else if (!strcmp(argv[i], "--req-all") || !strcmp(argv[i], "-r")) {
-            Config.RequireAll = true;
-
-        } else if (!strcmp(argv[i], "--unsecure") || !strcmp(argv[i], "-u")) {
-            Config.CredFlags |= QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
-
-        } else if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-v")) {
-            printf("quicreach " QUICREACH_VERSION "\n");
-        }
-    }
-
-    return true;
-}
-
-
 struct ReachConnection : public MsQuicConnection {
     const char* HostName;
     bool HandshakeComplete {false};
@@ -230,7 +144,6 @@ struct ReachConnection : public MsQuicConnection {
 private:
     void OnReachable() {
         succeeded = true;
-        printf(succeeded ? "true" : "false");
         HandshakeComplete = true;
         IncStat(Results.ReachableCount);
         GetStatistics(&Stats);
@@ -292,31 +205,6 @@ private:
     }
 };
 
-void DumpResultsToFile() {
-    FILE* File = fopen(Config.OutCsvFile, "wx"); // Try to create a new file
-    if (!File) {
-        File = fopen(Config.OutCsvFile, "a"); // Open an existing file
-        if (!File) {
-            printf("Failed to open output file: %s\n", Config.OutCsvFile);
-            return;
-        }
-    } else {
-        fprintf(File, "UtcDateTime,Total,Reachable,TooMuch,MultiRtt,Retry,IPv6,QuicV2\n");
-    }
-    char UtcDateTime[256];
-    time_t Time = time(nullptr);
-    struct tm* Tm = gmtime(&Time);
-    strftime(UtcDateTime, sizeof(UtcDateTime), "%Y.%m.%d-%H:%M:%S", Tm);
-    fprintf(File, "%s,%u,%u,%u,%u,%u,%u,%u\n", UtcDateTime,
-        Results.TotalCount, Results.ReachableCount, Results.TooMuchCount, Results.MultiRttCount, Results.RetryCount, Results.IPv6Count, Results.Quicv2Count);
-    fclose(File);
-    printf("\nOutput written to %s\n", Config.OutCsvFile);
-}
-
-// TODO:
-// - MsQuic should expose HRR flag for handshake?
-// - Figure out a way to fingerprint the server implementation?
-
 bool TestReachability() {
     MsQuicRegistration Registration("quicreach");
     MsQuicConfiguration Configuration(Registration, Config.Alpn, Config.Settings, MsQuicCredentialConfig(Config.CredFlags));
@@ -352,36 +240,34 @@ bool TestReachability() {
         }
     }
 
-    if (Config.OutCsvFile) DumpResultsToFile();
-
     return Config.RequireAll ? ((size_t)Results.ReachableCount == Config.HostNames.size()) : (Results.ReachableCount != 0);
 }
 
-/*
 enum QuicProbeState {PROBE_DOWN, PROBE_UP, PROBE_PAUSED, PROBE_STOPPED, PROBE_NONEXISTANT};
-enum ClientState    {CLIENT_DOWN, CLIENT_HEALTHY, CLIENT_UNHEALTHY, CLIENT_UNKNOWN};
+enum ClientState    {CLIENT_DOWN, CLIENT_HEALTHY, CLIENT_UNHEALTHY, CLIENT_UNKNOWN, CLIENT_PROBE_NONEXISTANT};
 
 struct AsyncQuicProbe {
     private:
-        MsQuicApi* api = nullptr;
-        QuicProbeState   state;
-        ClientState      clientState;
+        const MsQuicApi* api         = nullptr;
+        QuicProbeState   state       = PROBE_NONEXISTANT;
+        ClientState      clientState = CLIENT_UNKNOWN;
         const char*      targetUrl;
-        thread           worker;
+        thread*          worker;
         bool             paused;
         bool             stopped;
     public:
-        AsyncQuicProbe(const char* url, MsQuicApi& api){
+        mutex            Mutex;
+        AsyncQuicProbe(const char* url, const MsQuicApi* api){
             targetUrl = _strdup(url);
-            this->api = &api;
+            this->api = api;
             beginProbe();
         }
 
         ~AsyncQuicProbe(){
-            delete targetUrl;
+            delete[] targetUrl;
         }
 
-        void           threadFunc(); //looping quic query function that runs inside thread
+        static void    threadFunc(AsyncQuicProbe* parent); //looping quic query function that runs inside thread
         void           beginProbe();
         void           pauseProbe();
         void           stopProbe();
@@ -389,95 +275,207 @@ struct AsyncQuicProbe {
         ClientState    getClientState();
 };
 
-void AsyncQuicProbe::threadFunc(){
-    while(!stopped){
+bool reachableURL(_In_ const char* url){ //blocking function, TODO FIX LEAKY MEMORY   
+    struct Container {
+        ReachConnection* n;
+    };
+
+    Container c;
+
+    auto fun = [url, &c](){
+        MsQuicRegistration registration(url);
+        MsQuicConfiguration Configuration(registration, Config.Alpn, Config.Settings, MsQuicCredentialConfig(Config.CredFlags));
+        
+        c.n = new ReachConnection(registration, Configuration, url);
+    };
+    thread t(fun);
+    t.join();
+    bool succeed = c.n->succeeded;
+
+    return succeed;
+}
+
+mutex printMutex;
+mutex numMutex;
+int thread_count = 0;
+int thread_max = std::thread::hardware_concurrency() * 2;
+void AsyncQuicProbe::threadFunc(AsyncQuicProbe* parent){
+    parent->Mutex.lock();
+    const char* url = parent->targetUrl;
+
+    while(!parent->stopped){
+        parent->Mutex.unlock();
         this_thread::sleep_for(1s);
-        while(!paused && !stopped) {
-            this_thread::sleep_for(60s);
+
+        parent->Mutex.lock();
+        while(!parent->paused && !parent->stopped) {
+            parent->Mutex.unlock();
+
+            while(thread_count >= thread_max){
+                this_thread::sleep_for(.1s);
+                }
+
+            numMutex.lock();
+            thread_count++;
+            numMutex.unlock();
+            bool reach = reachableURL(url);
+            numMutex.lock();
+            thread_count--;
+            numMutex.unlock();
+
+            parent->Mutex.lock();
+            printMutex.lock();
+            cout << "Thread count: " << thread_count << endl;
+            if (reach){
+                cout << url << " " << "is up" << endl;
+                parent->clientState = CLIENT_HEALTHY;
+            } else {
+                cout << url << " " << "is down" << endl;
+                parent->clientState = CLIENT_DOWN;
+            }
+            printMutex.unlock();
+            parent->Mutex.unlock();
+            this_thread::sleep_for(15s);
+            parent->Mutex.lock();
         }
     }
 }
 
 void AsyncQuicProbe::beginProbe(){
-    paused    = false;
-    stopped   = false;
-    //this->worker = thread(&threadFunc);
+    Mutex.lock();
+    paused       = false;
+    stopped      = false;
+    this->worker = new thread(threadFunc, this);
+    Mutex.unlock();
 }
 
 void AsyncQuicProbe::pauseProbe(){
+    Mutex.lock();
     paused = true;
+    Mutex.unlock();
 }
 
 void AsyncQuicProbe::stopProbe(){
+    Mutex.lock();
     stopped = true;
-    worker.detach();
+    worker->detach();
     state = PROBE_STOPPED;
     clientState = CLIENT_UNKNOWN;
+    Mutex.unlock();
 }
+
+QuicProbeState AsyncQuicProbe::getProbeState(){//you have to lock and unlock the mutex for this function to read properly
+    return state;
+}
+
+ClientState AsyncQuicProbe::getClientState(){//you have to lock and unlock the mutex for this function to read properly
+    return clientState;
+}
+
 
 class QuicProbeManager {
     private:
-        unordered_map<char*, AsyncQuicProbe> probes;
+        unordered_map<char*, AsyncQuicProbe*> probes;
         MsQuicApi api;
     public:
-        QuicProbeState         getProbeState(char* url);
-        vector<QuicProbeState> getProbeStates();
-        ClientState            getClientState(char* url);
-        vector<ClientState>    getClientStates();
-        bool                   allocateProbe(char* url);
-        bool                   dealocateProbe(char* url);
+        QuicProbeState                       getProbeState(char* url);
+        unordered_map<char*, QuicProbeState> getProbeStates();
+        ClientState                          getClientState(char* url);
+        unordered_map<char*, ClientState>    getClientStates();
+        bool                                 allocateProbe(const char* url);
+        bool                                 dealocateProbe(char* url);
 
 };
 
 QuicProbeState QuicProbeManager::getProbeState(char* url){
     if (probes.find(url) != probes.end()){
-        return probes[url].getProbeState();
+        probes[url]->Mutex.lock();
+        auto state = probes[url]->getProbeState();
+        probes[url]->Mutex.unlock();
+
+        return state;
     }
 
     return PROBE_NONEXISTANT;
 };
 
-vector<QuicProbeState> QuicProbeManager::getProbeStates(){ //TODO change this to a map
-    vector<QuicProbeState> states;
+unordered_map<char*, QuicProbeState>QuicProbeManager::getProbeStates(){ //TODO change this to a map
+    unordered_map<char*, QuicProbeState> states;
     for (auto i = probes.begin(); i != probes.end(); ++i){
         try {
-            auto state = i->second.getProbeState();
-            states.push_back(state);
+            auto state = this->getProbeState(i->first);
+            states[i->first] = state;
         } catch (...) {
-            states.push_back(PROBE_DOWN);
+            states[i->first] = PROBE_DOWN;
         }
     }
+    return states;
 }
-*/
 
-ReachConnection* n = nullptr;
-void foo(){
-    auto registration = MsQuicRegistration("test");
-    MsQuicConfiguration Configuration(registration, Config.Alpn, Config.Settings, MsQuicCredentialConfig(Config.CredFlags));
-    
-    n = new ReachConnection(registration, Configuration, "google.com");
+ClientState QuicProbeManager::getClientState(char* url){
+    if (probes.find(url) != probes.end()){
+        probes[url]->Mutex.lock();
+        auto state = probes[url]->getClientState();
+        probes[url]->Mutex.unlock();
+
+        return state;
+    }
+
+    return CLIENT_PROBE_NONEXISTANT;
+}
+
+bool QuicProbeManager::allocateProbe(const char* url){
+    auto copy = _strdup(url);
+    if (probes.find(copy) != probes.end()){
+        delete[] copy;
+        return false;
+    }
+
+    probes[copy] = new AsyncQuicProbe(url, MsQuic);
+    return true;
+}
+
+bool QuicProbeManager::dealocateProbe(char* url){
+    if (probes.find(url) == probes.end()){
+        return false;
+    }
+    delete probes[url];
+    probes.erase(url);
+    return true;
+}
+
+unordered_map<char*, ClientState>QuicProbeManager::getClientStates(){ //TODO change this to a map
+    unordered_map<char*, ClientState> states;
+    for (auto i = probes.begin(); i != probes.end(); ++i){
+        try {
+            auto state = this->getClientState(i->first);
+            states[i->first] = state;
+        } catch (...) {
+            states[i->first] = CLIENT_UNKNOWN;
+        }
+    }
+    return states;
 }
 
 int QUIC_CALL main() {
-    
-    
     MsQuic = new (std::nothrow) MsQuicApi();
-    
-    thread(foo).join();
-    
-    printf(n->succeeded ? "true" : "false");
     /*
-    if (QUIC_FAILED(MsQuic->GetInitStatus())) {
-        printf("MsQuicApi failed, 0x%x\n", MsQuic->GetInitStatus());
-        return 1;
+    string input = "";
+    vector<AsyncQuicProbe*> probes;
+    while(input != "end"){
+        cin >> input;
+        probes.push_back(new AsyncQuicProbe(input.c_str(), MsQuic));
+    }  
+    */
+    QuicProbeManager manager;
+    for (int i = 0; i < 1000; i++){
+        new AsyncQuicProbe(TopDomains[i], MsQuic);
+        //manager.allocateProbe(TopDomains[i]);
     }
 
-    bool Result = TestReachability();
-    if (!Config.PrintStatistics) {
-        printf("%s\n", Result ? "Success" : "Failure");
-    }
-    
+    string s;
+    cin >> s;
     delete MsQuic;
-    */
+    
     return 0;
 }
